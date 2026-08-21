@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FHIR Validator | Static Web Validator</title>
+<meta name="description" content="A free, static, browser-based FHIR resource validator. Validate structure against the base FHIR spec, run built-in checks for US Core / Da Vinci PDex / CARIN BB, or send to the official HL7 validator." />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🩺</text></svg>" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">🩺</span>
+    <div>
+      <h1>FHIR Validator</h1>
+      <p class="tagline">A free, static, client-side FHIR resource validator — hosted on GitHub Pages</p>
+    </div>
+  </div>
+  <a class="gh-link" href="https://github.com/" target="_blank" rel="noopener">View on GitHub ↗</a>
+</header>
+
+<main class="layout">
+
+  <!-- LEFT: INPUT -->
+  <section class="panel input-panel">
+    <div class="panel-header">
+      <h2>1. Provide a FHIR resource</h2>
+      <div class="input-actions">
+        <button id="loadSampleBtn" class="btn ghost small">Load sample</button>
+        <label class="btn ghost small file-btn">
+          Upload file
+          <input type="file" id="fileInput" accept=".json,application/json" hidden />
+        </label>
+        <button id="clearBtn" class="btn ghost small">Clear</button>
+      </div>
+    </div>
+
+    <textarea id="resourceInput" spellcheck="false" placeholder='Paste a FHIR JSON resource here, e.g.
+{
+  "resourceType": "Patient",
+  "id": "example",
+  ...
+}'></textarea>
+
+    <div class="options-grid">
+      <div class="option">
+        <label for="fhirVersion">FHIR version</label>
+        <select id="fhirVersion">
+          <option value="4.0.1" selected>R4 (4.0.1)</option>
+          <option value="4.3.0">R4B (4.3.0)</option>
+          <option value="5.0.0">R5 (5.0.0)</option>
+          <option value="3.0.2">STU3 (3.0.2)</option>
+        </select>
+      </div>
+      <div class="option">
+        <label for="igPreset">Implementation Guide (profile helper)</label>
+        <select id="igPreset">
+          <option value="">None / base FHIR only</option>
+          <option value="us-core">US Core</option>
+          <option value="pdex">Da Vinci PDex</option>
+          <option value="pdex-plan-net">Da Vinci PDex Plan-Net</option>
+          <option value="carin-bb">CARIN Blue Button (CARIN BB)</option>
+        </select>
+      </div>
+      <div class="option wide">
+        <label for="profileUrl">Profile URL(s) <span class="muted">(optional, comma-separated — used for the online check and shown in the offline report)</span></label>
+        <input type="text" id="profileUrl" placeholder="e.g. http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient|6.1.0" />
+      </div>
+    </div>
+
+    <div class="run-actions">
+      <button id="validateOfflineBtn" class="btn primary">▶ Run structural + profile checks (offline)</button>
+      <button id="validateOnlineBtn" class="btn secondary">☁ Send to official HL7 validator (validator.fhir.org)</button>
+    </div>
+    <p class="hint">
+      <strong>Offline checks</strong> run entirely in your browser — JSON validity, base FHIR structural &amp; cardinality rules, and hand-built checks for common US Core / Da Vinci PDex / PDex Plan-Net / CARIN BB requirements. They work even without internet access, once the page is loaded, and nothing leaves your browser.
+      <strong>Online check</strong> sends the resource to the public HL7 validator service (validator.fhir.org) for full profile, terminology and invariant validation; it requires internet access and may occasionally be blocked by the browser's cross-origin policy, in which case a one-click fallback to the official site is provided.
+    </p>
+  </section>
+
+  <!-- RIGHT: RESULTS -->
+  <section class="panel results-panel">
+    <div class="panel-header">
+      <h2>2. Results</h2>
+      <div id="summaryBadges" class="summary-badges"></div>
+    </div>
+    <div id="resultsBody" class="results-body">
+      <div class="empty-state">
+        <p>👋 Paste or upload a FHIR resource, then click one of the validate buttons.</p>
+        <p class="muted">Nothing is sent anywhere unless you click "Send to official HL7 validator".</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <p>Built as a static site — safe to host on GitHub Pages. No backend, no server-side code, no data stored. Offline checks use the official FHIR JSON Schemas; online checks call the public <a href="https://validator.fhir.org" target="_blank" rel="noopener">validator.fhir.org</a> service maintained by the FHIR community / HL7.</p>
+</footer>
+
+<script src="js/fhir-knowledge.js"></script>
+<script src="js/validator-offline.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
