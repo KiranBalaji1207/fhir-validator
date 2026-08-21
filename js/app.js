@@ -114,36 +114,29 @@
   //
   // validator.fhir.org is powered by the "validator-wrapper" project
   // (https://github.com/hapifhir/org.hl7.fhir.validator-wrapper). Its /validate endpoint
-  // expects a JSON *request wrapper* object (not the raw FHIR resource as the body), and
-  // returns a JSON *ValidationOutcome* object (not a plain FHIR OperationOutcome). Sending
-  // the raw resource with a `application/fhir+json` content type — which looks like the
-  // "obvious" way to call it — results in an HTTP 415 (Unsupported Media Type), since the
-  // server is expecting `application/json` with this specific wrapper shape.
+  // expects a JSON request body shaped like:
+  //   { "cliContext": { "sv": "...", "ig": [...], "profiles": [...] },
+  //     "filesToValidate": [ { "fileName": "...", "fileContent": "...", "fileType": "json" } ] }
+  // (confirmed directly from the project's own http-client-tests fixtures/preset-requests),
+  // and returns:
+  //   { "outcomes": [ { "issues": [ { "line", "col", "message", "type", "level" } ] } ] }
+  // Earlier attempts that sent the raw resource directly (HTTP 415) or used top-level
+  // filename/fileContent fields instead of a filesToValidate array (HTTP 400 "No files for
+  // validation provided in request") were based on incorrect guesses about this shape.
 
   const ONLINE_VALIDATE_URL = "https://validator.fhir.org/validate";
 
-  function makeSessionId() {
-    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
-    return "sess-" + Date.now() + "-" + Math.random().toString(16).slice(2);
-  }
-
   async function callOnlineValidator(text, profiles, version) {
-    const igList = profiles && profiles.length
-      ? profiles.map(p => ({ url: p.split("|")[0], version: p.includes("|") ? p.split("|")[1] : undefined }))
-      : [];
-
     const requestBody = {
       cliContext: {
         sv: version || "4.0.1",
-        ig: igList.map(i => i.url + (i.version ? `#${i.version}` : "")),
+        ig: [],
         profiles: profiles || [],
-        locale: "en",
-        displayWarnings: true
+        locale: "en"
       },
-      filename: "resource.json",
-      fileContent: text,
-      fileType: "json",
-      sessionId: makeSessionId()
+      filesToValidate: [
+        { fileName: "resource.json", fileContent: text, fileType: "json" }
+      ]
     };
 
     const response = await fetch(ONLINE_VALIDATE_URL, {
@@ -164,19 +157,40 @@
     return parsedBody;
   }
 
-  // The validator-wrapper's ValidationOutcome shape looks roughly like:
-  //   { fileInfo: {...}, messages: [ { level|severity, message|display, line, col, location } ], validated: bool }
-  // Some deployments / versions instead return a plain FHIR OperationOutcome:
-  //   { resourceType: "OperationOutcome", issue: [ { severity, details:{text}, diagnostics, expression, location } ] }
-  // We handle both shapes defensively.
+  // Response shape confirmed from validator-wrapper's own test assertions:
+  //   response.body.outcomes[0].issues -> [{ line, col, message, type, level }]
+  // `level` is the severity (e.g. INFORMATION, WARNING, ERROR, FATAL).
+  // We defensively also support a couple of alternate shapes in case the public
+  // service's contract shifts again in the future.
   function normalizeOnlineResponse(body) {
     if (!body) {
       return [{ severity: "information", message: "The validator responded, but the response body was empty or not valid JSON.", path: "", source: "online" }];
     }
 
-    const sevMap = { fatal: "error", error: "error", warn: "warning", warning: "warning", info: "information", information: "information" };
+    const sevMap = { fatal: "error", error: "error", warn: "warning", warning: "warning", info: "information", information: "information", informational: "information" };
 
-    // Shape 1: validator-wrapper ValidationOutcome { messages: [...] }
+    // Shape 1 (confirmed): { outcomes: [ { issues: [...] } ] }
+    if (Array.isArray(body.outcomes)) {
+      const allIssues = [];
+      body.outcomes.forEach(outcome => {
+        (outcome.issues || []).forEach(iss => {
+          const rawSeverity = (iss.level || iss.severity || "information").toString().toLowerCase();
+          const loc = iss.line !== undefined ? `line ${iss.line}${iss.col !== undefined ? `, col ${iss.col}` : ""}` : (iss.location || "");
+          allIssues.push({
+            severity: sevMap[rawSeverity] || "information",
+            message: iss.message || iss.display || "Unspecified issue",
+            path: loc,
+            source: "online"
+          });
+        });
+      });
+      if (!allIssues.length) {
+        return [{ severity: "success", message: "The official validator found no issues with this resource.", path: "", source: "online" }];
+      }
+      return allIssues;
+    }
+
+    // Shape 2 (fallback): { messages: [...] }
     if (Array.isArray(body.messages)) {
       if (!body.messages.length) {
         return [{ severity: "success", message: "The official validator found no issues with this resource.", path: "", source: "online" }];
@@ -193,7 +207,7 @@
       });
     }
 
-    // Shape 2: plain FHIR OperationOutcome { resourceType: "OperationOutcome", issue: [...] }
+    // Shape 3 (fallback): plain FHIR OperationOutcome { resourceType: "OperationOutcome", issue: [...] }
     if (Array.isArray(body.issue)) {
       return body.issue.map(i => ({
         severity: sevMap[(i.severity || "information").toLowerCase()] || "information",
