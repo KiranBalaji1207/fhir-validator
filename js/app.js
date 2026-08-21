@@ -110,54 +110,107 @@
     renderOfflineResults(result);
   });
 
-  // ---- Online validation (best-effort call to the public HL7 validator service) ----
+  // ---- Online validation (best-effort call to the public HL7 validator-wrapper service) ----
+  //
+  // validator.fhir.org is powered by the "validator-wrapper" project
+  // (https://github.com/hapifhir/org.hl7.fhir.validator-wrapper). Its /validate endpoint
+  // expects a JSON *request wrapper* object (not the raw FHIR resource as the body), and
+  // returns a JSON *ValidationOutcome* object (not a plain FHIR OperationOutcome). Sending
+  // the raw resource with a `application/fhir+json` content type — which looks like the
+  // "obvious" way to call it — results in an HTTP 415 (Unsupported Media Type), since the
+  // server is expecting `application/json` with this specific wrapper shape.
 
   const ONLINE_VALIDATE_URL = "https://validator.fhir.org/validate";
 
-  async function callOnlineValidator(text, profiles, version) {
-    const params = new URLSearchParams();
-    if (profiles && profiles.length) params.set("profile", profiles.join(","));
-    if (version) params.set("sv", version);
-    const url = `${ONLINE_VALIDATE_URL}?${params.toString()}`;
+  function makeSessionId() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return "sess-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+  }
 
-    const response = await fetch(url, {
+  async function callOnlineValidator(text, profiles, version) {
+    const igList = profiles && profiles.length
+      ? profiles.map(p => ({ url: p.split("|")[0], version: p.includes("|") ? p.split("|")[1] : undefined }))
+      : [];
+
+    const requestBody = {
+      cliContext: {
+        sv: version || "4.0.1",
+        ig: igList.map(i => i.url + (i.version ? `#${i.version}` : "")),
+        profiles: profiles || [],
+        locale: "en",
+        displayWarnings: true
+      },
+      filename: "resource.json",
+      fileContent: text,
+      fileType: "json",
+      sessionId: makeSessionId()
+    };
+
+    const response = await fetch(ONLINE_VALIDATE_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/fhir+json" },
-      body: text
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody)
     });
 
+    const raw = await response.text();
+    let parsedBody;
+    try { parsedBody = JSON.parse(raw); } catch (e) { parsedBody = null; }
+
     if (!response.ok) {
-      throw new Error(`Validator service responded with HTTP ${response.status}`);
+      const detail = (parsedBody && (parsedBody.message || parsedBody.error)) || raw.slice(0, 300) || `HTTP ${response.status}`;
+      throw new Error(`Validator service responded with HTTP ${response.status}: ${detail}`);
     }
-    return response.json();
+
+    return parsedBody;
   }
 
-  function operationOutcomeToIssues(oo) {
-    if (!oo || !Array.isArray(oo.issue)) {
-      return [{ severity: "information", message: "The validator responded, but not in the expected OperationOutcome format. Raw response has been logged to the browser console.", path: "", source: "online" }];
+  // The validator-wrapper's ValidationOutcome shape looks roughly like:
+  //   { fileInfo: {...}, messages: [ { level|severity, message|display, line, col, location } ], validated: bool }
+  // Some deployments / versions instead return a plain FHIR OperationOutcome:
+  //   { resourceType: "OperationOutcome", issue: [ { severity, details:{text}, diagnostics, expression, location } ] }
+  // We handle both shapes defensively.
+  function normalizeOnlineResponse(body) {
+    if (!body) {
+      return [{ severity: "information", message: "The validator responded, but the response body was empty or not valid JSON.", path: "", source: "online" }];
     }
-    const sevMap = { fatal: "error", error: "error", warning: "warning", information: "information" };
-    return oo.issue.map(i => ({
-      severity: sevMap[i.severity] || "information",
-      message: (i.details && i.details.text) || (i.diagnostics) || (i.code) || "Unspecified issue",
-      path: (i.expression && i.expression.join(", ")) || (i.location && i.location.join(", ")) || "",
-      source: "online"
-    }));
-  }
 
-  function renderOnlineNote(message, isError) {
-    const note = document.createElement("div");
-    note.className = "online-note";
-    note.innerHTML = message;
-    resultsBody.prepend(note);
+    const sevMap = { fatal: "error", error: "error", warn: "warning", warning: "warning", info: "information", information: "information" };
+
+    // Shape 1: validator-wrapper ValidationOutcome { messages: [...] }
+    if (Array.isArray(body.messages)) {
+      if (!body.messages.length) {
+        return [{ severity: "success", message: "The official validator found no issues with this resource.", path: "", source: "online" }];
+      }
+      return body.messages.map(m => {
+        const rawSeverity = (m.level || m.severity || "information").toString().toLowerCase();
+        const loc = m.location || (m.line !== undefined ? `line ${m.line}${m.col !== undefined ? `, col ${m.col}` : ""}` : "");
+        return {
+          severity: sevMap[rawSeverity] || "information",
+          message: m.message || m.display || m.text || "Unspecified issue",
+          path: loc || "",
+          source: "online"
+        };
+      });
+    }
+
+    // Shape 2: plain FHIR OperationOutcome { resourceType: "OperationOutcome", issue: [...] }
+    if (Array.isArray(body.issue)) {
+      return body.issue.map(i => ({
+        severity: sevMap[(i.severity || "information").toLowerCase()] || "information",
+        message: (i.details && i.details.text) || i.diagnostics || i.code || "Unspecified issue",
+        path: (i.expression && i.expression.join(", ")) || (i.location && i.location.join(", ")) || "",
+        source: "online"
+      }));
+    }
+
+    return [{ severity: "information", message: "The validator responded, but not in a format this page recognizes. Raw response has been logged to the browser console.", path: "", source: "online" }];
   }
 
   validateOnlineBtn.addEventListener("click", async () => {
     const text = resourceInput.value.trim();
     if (!text) { alert("Please paste or upload a FHIR resource first."); return; }
 
-    let parsed;
-    try { parsed = JSON.parse(text); } catch (e) {
+    try { JSON.parse(text); } catch (e) {
       renderOfflineResults({ parseError: e.message, issues: [{ severity: "error", message: `Invalid JSON: ${e.message}`, path: "", source: "syntax" }] });
       return;
     }
@@ -167,16 +220,18 @@
     summaryBadges.innerHTML = "";
 
     try {
-      const oo = await callOnlineValidator(text, profiles, fhirVersion.value);
-      const issues = operationOutcomeToIssues(oo);
+      const body = await callOnlineValidator(text, profiles, fhirVersion.value);
+      console.log("validator.fhir.org raw response:", body);
+      const issues = normalizeOnlineResponse(body);
       renderSummary(issues);
       resultsBody.innerHTML = renderIssues("Official HL7 validator (validator.fhir.org)", issues) ||
         `<div class="empty-state"><p>Validator returned no issues.</p></div>`;
     } catch (err) {
       resultsBody.innerHTML = `
         <div class="online-note">
-          <strong>Couldn't reach the online validator from this static page.</strong><br/>
-          This is usually caused by the browser's cross-origin (CORS) policy, or lack of internet access, not a problem with your resource.<br/><br/>
+          <strong>Couldn't get a usable response from the online validator.</strong><br/>
+          This can happen if your browser blocks the cross-origin (CORS) request, you're offline, or the
+          public service's API has changed since this page was built.<br/><br/>
           <strong>Fallback options:</strong>
           <ol>
             <li>Use the <strong>offline checks</strong> button above (always works, no internet required after page load).</li>
